@@ -1,0 +1,128 @@
+-- Roblox 脚本安全检测工具
+-- 检测是否有额外脚本尝试抓取网址
+
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+-- 创建一个安全的控制台输出函数
+local function safePrint(...)
+    local args = {...}
+    local message = ""
+    for i, arg in ipairs(args) do
+        message = message .. tostring(arg) .. (i < #args and "\t" or "")
+    end
+    print("[安全检测] " .. message)
+end
+
+-- 检测异常的HTTP请求
+local originalRequest
+local function monitorHttpRequests()
+    if not originalRequest and HttpService.RequestAsync then
+        originalRequest = HttpService.RequestAsync
+        HttpService.RequestAsync = function(self, request)
+            safePrint("检测到HTTP请求:", request.Url, "方法:", request.Method)
+            
+            -- 检查可疑的URL
+            if string.find(request.Url:lower(), "webhook") or
+               string.find(request.Url:lower(), "api") or
+               string.find(request.Url:lower(), "telegram") or
+               string.find(request.Url:lower(), "discord") then
+                safePrint("警告: 检测到可疑HTTP请求 -> " .. request.Url)
+            end
+            
+            return originalRequest(self, request)
+        end
+        safePrint("HTTP请求监控已启用")
+    end
+end
+
+-- 检测新注入的脚本
+local function monitorScriptInjections()
+    local function checkDescendants(parent)
+        for _, descendant in pairs(parent:GetDescendants()) do
+            if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+                if descendant:GetFullName():find("CoreGui") or descendant:GetFullName():find("CoreScripts") then
+                    -- 这是Roblox核心脚本，跳过
+                    continue
+                end
+                
+                -- 检查脚本内容
+                local success, source = pcall(function()
+                    return descendant.Source
+                end)
+                
+                if success and source then
+                    -- 检查是否有可疑的HTTP请求代码
+                    if source:find("RequestAsync") or source:find("HttpService") then
+                        if not source:find("-- 安全检测") and not source:find("monitorHttpRequests") then
+                            safePrint("警告: 检测到可能恶意的脚本 -> " .. descendant:GetFullName())
+                        end
+                    end
+                    
+                    -- 检查是否有远程事件/函数调用
+                    if source:find("RemoteEvent") or source:find("RemoteFunction") then
+                        safePrint("检测到远程通信脚本 -> " .. descendant:GetFullName())
+                    end
+                end
+            end
+        end
+    end
+    
+    -- 初始检查
+    checkDescendants(game)
+    
+    -- 监听新添加的对象
+    game.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+            safePrint("新脚本注入: " .. descendant:GetFullName())
+            
+            -- 延迟检查以确保脚本已加载
+            delay(1, function()
+                local success, source = pcall(function()
+                    return descendant.Source
+                end)
+                
+                if success and source then
+                    if source:find("RequestAsync") or source:find("HttpService") then
+                        safePrint("警告: 新脚本包含HTTP请求功能 -> " .. descendant:GetFullName())
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+-- 监控玩家角色的变化
+local function monitorPlayerCharacters()
+    Players.PlayerAdded:Connect(function(player)
+        player.CharacterAdded:Connect(function(character)
+            safePrint("玩家角色加载: " .. player.Name)
+            checkDescendants(character)
+        end)
+    end)
+end
+
+-- 主函数
+local function main()
+    safePrint("脚本安全检测工具已启动")
+    safePrint("游戏: " .. game.Name)
+    safePrint("地点: " .. game.PlaceId)
+    
+    -- 启动监控
+    monitorHttpRequests()
+    monitorScriptInjections()
+    monitorPlayerCharacters()
+    
+    -- 定期报告
+    while true do
+        wait(30)
+        safePrint("定期检查: 系统运行正常")
+    end
+end
+
+-- 安全启动
+local success, err = pcall(main)
+if not success then
+    safePrint("错误: " .. tostring(err))
+end
