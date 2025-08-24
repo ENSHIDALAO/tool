@@ -1,128 +1,236 @@
--- Roblox 脚本安全检测工具
--- 检测是否有额外脚本尝试抓取网址
+-- Roblox 作弊脚本检测与防护系统
+-- 检测并阻止类似: loadstring(game:HttpGet("URL"))() 的作弊脚本
 
+local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
 
--- 创建一个安全的控制台输出函数
-local function safePrint(...)
-    local args = {...}
-    local message = ""
-    for i, arg in ipairs(args) do
-        message = message .. tostring(arg) .. (i < #args and "\t" or "")
-    end
-    print("[安全检测] " .. message)
+-- 创建安全日志函数
+local function logSecurityEvent(message, player)
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    local playerInfo = player and ("玩家: " .. player.Name .. " (" .. player.UserId .. ")") or "系统"
+    print("[安全日志] " .. timestamp .. " - " .. playerInfo .. " - " .. message)
+    
+    -- 这里可以添加将日志发送到服务器或保存到数据存储的代码
 end
 
--- 检测异常的HTTP请求
-local originalRequest
-local function monitorHttpRequests()
-    if not originalRequest and HttpService.RequestAsync then
-        originalRequest = HttpService.RequestAsync
-        HttpService.RequestAsync = function(self, request)
-            safePrint("检测到HTTP请求:", request.Url, "方法:", request.Method)
-            
-            -- 检查可疑的URL
-            if string.find(request.Url:lower(), "webhook") or
-               string.find(request.Url:lower(), "api") or
-               string.find(request.Url:lower(), "telegram") or
-               string.find(request.Url:lower(), "discord") then
-                safePrint("警告: 检测到可疑HTTP请求 -> " .. request.Url)
+-- 检测恶意字符串模式
+local function isMaliciousCode(code)
+    if not code or type(code) ~= "string" then return false end
+    
+    local lowerCode = code:lower()
+    
+    -- 检测常见的恶意代码模式
+    local patterns = {
+        "loadstring%(game:httpget%(",
+        "game:httpget%(",
+        "loadstring%(",
+        "https?://raw%.githubusercontent%.com/",
+        "https?://pastebin%.com/",
+        "https?://hastebin%.com/",
+        "https?://discordapp%.com/api/webhooks/",
+        "getfenv%(",
+        "setfenv%(",
+        "hookfunction%(",
+        "newcclosure%(",
+        "checkcaller%(",
+        "setmetatable%(",
+        "getrawmetatable%(",
+        "setreadonly%(",
+        "makewriteable%(",
+        "islclosure%(",
+        "is_synapse_function%(",
+        "isexecutorclosure%(",
+    }
+    
+    for _, pattern in ipairs(patterns) do
+        if lowerCode:match(pattern) then
+            return true
+        end
+    end
+    
+    -- 检测特定的URL模式
+    local urlPatterns = {
+        "https?://[%w%.%-]+/.*",
+    }
+    
+    for _, pattern in ipairs(urlPatterns) do
+        local url = lowerCode:match(pattern)
+        if url and not url:find("roblox.com") then -- 允许Roblox官方域名
+            return true
+        end
+   
+    
+    return false
+end
+
+-- 监控脚本执行
+local function monitorScriptExecution()
+    -- 保存原始函数
+    local originalLoadstring = loadstring or load
+    local originalHttpGet
+    if game.HttpGet then
+        originalHttpGet = game.HttpGet
+    elseif game.HttpGetAsync then
+        originalHttpGet = game.HttpGetAsync
+    end
+    
+    -- 重写loadstring函数
+    if originalLoadstring then
+        loadstring = function(code, chunkname)
+            if isMaliciousCode(code) then
+                error("安全阻止: 检测到恶意代码执行尝试")
+            end
+            return originalLoadstring(code, chunkname)
+        end
+    end
+    
+    -- 重写HttpGet函数
+    if originalHttpGet then
+        if game.HttpGet then
+            game.HttpGet = function(self, url, ...)
+                logSecurityEvent("HTTP请求: " .. url, Players.LocalPlayer)
+                
+                if url:find("raw.githubusercontent.com") or 
+                   url:find("pastebin.com") or 
+                   url:find("hastebin.com") then
+                    error("安全阻止: 检测到可疑URL访问: " .. url)
+                end
+                
+                return originalHttpGet(self, url, ...)
+            end
+        end
+        
+        if game.HttpGetAsync then
+            game.HttpGetAsync = function(self, url, ...)
+                logSecurityEvent("HTTP请求: " .. url, Players.LocalPlayer)
+                
+                if url:find("raw.githubusercontent.com") or 
+                   url:find("pastebin.com") or 
+                   url:find("hastebin.com") then
+                    error("安全阻止: 检测到可疑URL访问: " .. url)
+                end
+                
+                return originalHttpGet(self, url, ...)
+            end
+        end
+    end
+    
+    logSecurityEvent("脚本执行监控已启用")
+end
+
+-- 监控新脚本注入
+local function monitorScriptInjections()
+    local function checkScript(script)
+        if script:IsA("Script") or script:IsA("LocalScript") then
+            -- 跳过Roblox核心脚本
+            if script:GetFullName():find("CoreGui") or 
+               script:GetFullName():find("CoreScripts") then
+                return
             end
             
-            return originalRequest(self, request)
-        end
-        safePrint("HTTP请求监控已启用")
-    end
-end
-
--- 检测新注入的脚本
-local function monitorScriptInjections()
-    local function checkDescendants(parent)
-        for _, descendant in pairs(parent:GetDescendants()) do
-            if descendant:IsA("Script") or descendant:IsA("LocalScript") then
-                if descendant:GetFullName():find("CoreGui") or descendant:GetFullName():find("CoreScripts") then
-                    -- 这是Roblox核心脚本，跳过
-                    continue
-                end
+            -- 检查脚本内容
+            local success, source = pcall(function()
+                return script.Source
+            end)
+            
+            if success and source and isMaliciousCode(source) then
+                logSecurityEvent("检测到恶意脚本: " .. script:GetFullName(), Players.LocalPlayer)
                 
-                -- 检查脚本内容
-                local success, source = pcall(function()
-                    return descendant.Source
+                -- 尝试禁用脚本
+                pcall(function()
+                    script.Disabled = true
                 end)
                 
-                if success and source then
-                    -- 检查是否有可疑的HTTP请求代码
-                    if source:find("RequestAsync") or source:find("HttpService") then
-                        if not source:find("-- 安全检测") and not source:find("monitorHttpRequests") then
-                            safePrint("警告: 检测到可能恶意的脚本 -> " .. descendant:GetFullName())
-                        end
-                    end
-                    
-                    -- 检查是否有远程事件/函数调用
-                    if source:find("RemoteEvent") or source:find("RemoteFunction") then
-                        safePrint("检测到远程通信脚本 -> " .. descendant:GetFullName())
-                    end
-                end
+                -- 尝试删除脚本
+                pcall(function()
+                    script:Destroy()
+                end)
+                
+                -- 踢出玩家
+                pcall(function()
+                    Players.LocalPlayer:Kick("检测到作弊行为: 使用外部脚本")
+                end)
             end
         end
     end
     
     -- 初始检查
-    checkDescendants(game)
+    for _, script in ipairs(game:GetDescendants()) do
+        checkScript(script)
+    end
     
-    -- 监听新添加的对象
+    -- 监听新添加的脚本
     game.DescendantAdded:Connect(function(descendant)
         if descendant:IsA("Script") or descendant:IsA("LocalScript") then
-            safePrint("新脚本注入: " .. descendant:GetFullName())
+            logSecurityEvent("新脚本注入: " .. descendant:GetFullName(), Players.LocalPlayer)
             
             -- 延迟检查以确保脚本已加载
-            delay(1, function()
-                local success, source = pcall(function()
-                    return descendant.Source
-                end)
-                
-                if success and source then
-                    if source:find("RequestAsync") or source:find("HttpService") then
-                        safePrint("警告: 新脚本包含HTTP请求功能 -> " .. descendant:GetFullName())
-                    end
-                end
+            delay(2, function()
+                checkScript(descendant)
             end)
         end
     end)
 end
 
--- 监控玩家角色的变化
-local function monitorPlayerCharacters()
-    Players.PlayerAdded:Connect(function(player)
-        player.CharacterAdded:Connect(function(character)
-            safePrint("玩家角色加载: " .. player.Name)
-            checkDescendants(character)
-        end)
-    end)
+-- 监控环境变化
+local function monitorEnvironment()
+    -- 检查环境是否被篡改
+    local function checkEnvironment()
+        if getfenv and setfenv then
+            local env = getfenv(2)
+            if env and env.loadstring and env.loadstring ~= loadstring then
+                logSecurityEvent("环境篡改检测: loadstring函数被修改", Players.LocalPlayer)
+                Players.LocalPlayer:Kick("检测到环境篡改: 作弊行为")
+            end
+        end
+    end
+    
+    -- 定期检查环境
+    while true do
+        wait(10)
+        pcall(checkEnvironment)
+    end
 end
 
 -- 主函数
 local function main()
-    safePrint("脚本安全检测工具已启动")
-    safePrint("游戏: " .. game.Name)
-    safePrint("地点: " .. game.PlaceId)
+    logSecurityEvent("作弊脚本检测系统已启动")
     
     -- 启动监控
-    monitorHttpRequests()
+    monitorScriptExecution()
     monitorScriptInjections()
-    monitorPlayerCharacters()
     
-    -- 定期报告
-    while true do
-        wait(30)
-        safePrint("定期检查: 系统运行正常")
+    -- 在服务器端运行额外的监控
+    if RunService:IsServer() then
+        -- 监控玩家加入
+        Players.PlayerAdded:Connect(function(player)
+            logSecurityEvent("玩家加入游戏", player)
+            
+            -- 监控玩家角色
+            player.CharacterAdded:Connect(function(character)
+                logSecurityEvent("玩家角色加载", player)
+                
+                -- 检查角色中的脚本
+                for _, child in ipairs(character:GetDescendants()) do
+                    if child:IsA("Script") or child:IsA("LocalScript") then
+                        local success, source = pcall(function() return child.Source end)
+                        if success and source and isMaliciousCode(source) then
+                            logSecurityEvent("角色中发现恶意脚本", player)
+                            player:Kick("检测到作弊行为: 角色中的外部脚本")
+                        end
+                    end
+                end
+            end)
+        end)
+        
+        -- 启动环境监控
+        spawn(monitorEnvironment)
     end
 end
 
 -- 安全启动
 local success, err = pcall(main)
 if not success then
-    safePrint("错误: " .. tostring(err))
+    logSecurityEvent("系统错误: " .. tostring(err))
 end
